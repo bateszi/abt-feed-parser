@@ -10,6 +10,7 @@ import (
 	"io/ioutil"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -32,17 +33,18 @@ type DbConfig struct {
 }
 
 type Site struct {
-	siteId int
-	feedName string
-	feedUrl string
-	siteType string
-	active int
-	altName string
-	created string
-	modified string
-	lastChecked string
-	daysSinceLastPost int
-	posts []Post
+	siteId             int
+	feedName           string
+	feedUrl            string
+	siteType           string
+	active             int
+	altName            string
+	created            string
+	modified           string
+	lastChecked        string
+	daysSinceLastPost  int
+	preferredSiteTitle string
+	posts              []Post
 }
 
 type Post struct {
@@ -51,6 +53,7 @@ type Post struct {
 	link string
 	description string
 	content string
+	siteTitle string
 	categories []string
 	MediaIds []int64
 }
@@ -151,10 +154,29 @@ func getFeeds(db *sql.DB) []Site {
 			panic(err)
 		}
 
+		setPreferredSiteTitle(&rssFeed)
+
 		sitesToFetch = append(sitesToFetch, rssFeed)
 	}
 
 	return sitesToFetch
+}
+
+func setPreferredSiteTitle(rssFeed *Site) {
+	if rssFeed.altName != "" {
+		rssFeed.preferredSiteTitle = rssFeed.altName
+	} else if rssFeed.feedName != "" {
+		rssFeed.preferredSiteTitle = rssFeed.feedName
+	} else {
+		parsedUrl, err := url.Parse(rssFeed.feedUrl)
+
+		if err != nil {
+			rssFeed.preferredSiteTitle = "Untitled Blog"
+			return
+		}
+
+		rssFeed.preferredSiteTitle = parsedUrl.Host
+	}
 }
 
 func closeRssFeed(parsedFeed *SiteResponse, rssFeedChan chan<- SiteResponse) {
@@ -165,6 +187,7 @@ func closeRssFeed(parsedFeed *SiteResponse, rssFeedChan chan<- SiteResponse) {
 func updateSiteData(parsedFeed *SiteResponse)  {
 	if parsedFeed.site.siteType == "Anitube" {
 		parsedFeed.site.feedName = parsedFeed.youTubeFeed.Title
+		setPreferredSiteTitle(&parsedFeed.site)
 
 		for _, entry := range parsedFeed.youTubeFeed.Entries {
 			pubDate, err := time.Parse("2006-01-02T15:04:05-07:00", entry.Published)
@@ -176,6 +199,7 @@ func updateSiteData(parsedFeed *SiteResponse)  {
 				postTitle:   	entry.Title,
 				pubDate:     	pubDate.UTC().Format("2006-01-02 15:04:05"),
 				link:        	entry.Link.Href,
+				siteTitle:      parsedFeed.site.preferredSiteTitle,
 				description: 	entry.MediaGroup.Description,
 			}
 
@@ -183,6 +207,7 @@ func updateSiteData(parsedFeed *SiteResponse)  {
 		}
 	} else {
 		parsedFeed.site.feedName = parsedFeed.rssDoc.Channel.Title
+		setPreferredSiteTitle(&parsedFeed.site)
 
 		for _, item := range parsedFeed.rssDoc.Channel.Items {
 			pubDate, err := time.Parse("Mon, 02 Jan 2006 15:04:05 -0700", item.PubDate)
@@ -203,6 +228,7 @@ func updateSiteData(parsedFeed *SiteResponse)  {
 				postTitle:   	item.Title,
 				pubDate:     	pubDate.UTC().Format("2006-01-02 15:04:05"),
 				link:        	item.Link,
+				siteTitle:      parsedFeed.site.preferredSiteTitle,
 				description: 	item.Description,
 				content: 		item.Content,
 				categories:  	item.Categories,
@@ -243,7 +269,7 @@ func getSiteFeed(httpClient *http.Client, site Site, rssFeedChan chan<- SiteResp
 		req.Header.Add("User-Agent", "Baiduspider")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second * 10)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second * 20)
 
 	defer func(cancel context.CancelFunc) {
 		cancel()
@@ -375,8 +401,8 @@ func insertSitePost(db *sql.DB, post Post, response SiteResponse) {
 	postsWithLink := alreadyInsertdPost(db, post)
 	if postsWithLink == 0 {
 		stmt, err := db.Prepare("INSERT INTO `posts` " +
-			"(`fk_site_id`, `post_title`, `pub_date`, `link`, `description`, `content`) " +
-			"VALUES (?, ?, ?, ?, ?, ?)")
+			"(`fk_site_id`, `post_title`, `pub_date`, `link`, `site_title`, `description`, `content`) " +
+			"VALUES (?, ?, ?, ?, ?, ?, ?)")
 		if err != nil {
 			fmt.Println(
 				"Could not prepare SQL statement to insert post",
@@ -391,6 +417,7 @@ func insertSitePost(db *sql.DB, post Post, response SiteResponse) {
 			post.postTitle,
 			post.pubDate,
 			post.link,
+			post.siteTitle,
 			post.description,
 			post.content,
 		)
