@@ -122,7 +122,7 @@ type MediaMatched struct {
 }
 
 func getFeeds(db *sql.DB) []Site {
-	getFeedsRows, err := db.Query("SELECT * FROM sites WHERE active = 1")
+	getFeedsRows, err := db.Query("SELECT * FROM sites WHERE active = 1 ORDER BY last_checked ASC")
 	if err != nil {
 		panic(err)
 	}
@@ -773,13 +773,23 @@ func start() {
 		httpClient := &http.Client{}
 		rssChannel := make(chan SiteResponse, ttlSitesToFetch)
 
-		for _, siteToFetch := range sitesToFetch {
-			fetchingFeedsWg.Add(1)
+		step := 100
 
-			go getSiteFeed(httpClient, siteToFetch, rssChannel)
+		if step >= ttlSitesToFetch {
+			step = ttlSitesToFetch
 		}
 
-		fetchingFeedsWg.Wait()
+		for i := 0; i < ttlSitesToFetch; i++ {
+			fetchFeedsInBatch(sitesToFetch[i:step], rssChannel)
+
+			i += 99
+			step += 100
+
+			if step >= ttlSitesToFetch {
+				step = ttlSitesToFetch
+			}
+		}
+
 		fmt.Println("Finished fetching feeds")
 		close(rssChannel)
 
@@ -802,6 +812,18 @@ func start() {
 
 		updateSolr(config.Solr, httpClient)
 	}
+}
+
+func fetchFeedsInBatch(sitesToFetch []Site, rssChannel chan<- SiteResponse) {
+	httpClient := &http.Client{}
+
+	for _, siteToFetch := range sitesToFetch {
+		fetchingFeedsWg.Add(1)
+
+		go getSiteFeed(httpClient, siteToFetch, rssChannel)
+	}
+
+	fetchingFeedsWg.Wait()
 }
 
 func runFeedFetcher(d time.Duration) {
